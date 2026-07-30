@@ -51,9 +51,11 @@ pyo3 = { workspace = true, optional = true }
 postcard.workspace = true
 axum = { version = "0.7", features = ["macros"] }
 tower = { version = "0.4", features = ["util"] }
-tikv-jemallocator.workspace = true
 zeroize = "1.8.2"
 thiserror.workspace = true
+
+[target.'cfg(not(windows))'.dependencies]
+tikv-jemallocator.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
