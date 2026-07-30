@@ -12,8 +12,10 @@ vllm-tests = ["vllm"]
 [dependencies]
 pyo3 = { workspace = true, optional = true }
 anyhow.workspace = true
+async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 uuid = { version = "1.10", features = ["v4"] }
 

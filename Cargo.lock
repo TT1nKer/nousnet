@@ -7365,12 +7365,14 @@ name = "psyche-inference"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "iroh",
  "postcard",
  "pyo3",
  "serde",
  "serde_json",
  "serial_test",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "uuid",
