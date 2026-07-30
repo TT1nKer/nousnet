@@ -7366,9 +7366,12 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum",
+ "futures-util",
  "iroh",
  "postcard",
  "pyo3",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "serial_test",
