@@ -8,6 +8,12 @@ Psyche is a set of systems that enable distributed training of transformer-based
 
 For detailed documentation on the Psyche project, please visit [the Psyche docs](https://docs.psyche.network).
 
+## Koinon services
+
+- [`services/marketplace`](services/marketplace) contains the TTinker Grid
+  marketplace website and control plane. Its execution boundary is Koinon's
+  existing inference node and gateway under `architectures/inference-only`.
+
 <p align="center" width="100%">
     <a href="https://www.youtube.com/watch?v=XMWI3nDk48c">
         <img src="./psyche-book/src/psyche_youtube.png">

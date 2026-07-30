@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title">
+  <title id="title">TTinker Grid</title>
+  <rect x="8" y="8" width="112" height="112" rx="18" fill="#0a0d0c" stroke="#c8ff47" stroke-width="4"/>
+  <path d="M94 34H46c-8 0-12 4-12 12v36c0 8 4 12 12 12h36c8 0 12-4 12-12V64H66"
+        fill="none" stroke="#c8ff47" stroke-width="8" stroke-linecap="square" stroke-linejoin="miter"/>
+  <g fill="#0a0d0c" stroke="#c8ff47" stroke-width="4">
+    <circle cx="34" cy="34" r="7"/>
+    <circle cx="94" cy="34" r="7"/>
+    <circle cx="34" cy="94" r="7"/>
+    <circle cx="94" cy="64" r="7"/>
+    <circle cx="94" cy="94" r="7"/>
+    <circle cx="66" cy="64" r="7"/>
+  </g>
+</svg>

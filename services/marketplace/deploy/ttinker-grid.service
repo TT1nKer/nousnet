@@ -1,0 +1,36 @@
+[Unit]
+Description=TTinker Grid early-access intake API
+After=network.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=ttinker-grid
+StateDirectoryMode=0700
+UMask=0077
+WorkingDirectory=/opt/ttinker-grid/current
+ExecStart=/usr/bin/python3 /opt/ttinker-grid/current/server.py --host 127.0.0.1 --port 8092 --database /var/lib/ttinker-grid/applications.sqlite3
+Restart=on-failure
+RestartSec=3
+KillSignal=SIGINT
+TimeoutStopSec=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+TasksMax=64
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

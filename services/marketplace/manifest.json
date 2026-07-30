@@ -1,0 +1,17 @@
+{
+  "name": "TTinker Grid",
+  "short_name": "Grid",
+  "description": "开放模型推理算力市场",
+  "start_url": "/grid/",
+  "display": "standalone",
+  "background_color": "#090c0b",
+  "theme_color": "#090c0b",
+  "icons": [
+    {
+      "src": "/grid/favicon-grid.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
