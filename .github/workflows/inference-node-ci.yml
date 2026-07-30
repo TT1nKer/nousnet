@@ -27,6 +27,14 @@ jobs:
           rustup default stable
           cargo --version
 
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target
+          key: inference-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'architectures/inference-only/inference-node/Cargo.toml', 'shared/inference/Cargo.toml') }}
+
       - name: Reject training dependencies
         run: |
           cargo tree \

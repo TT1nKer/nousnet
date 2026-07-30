@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 
 #[derive(Debug, Serialize, Deserialize)]
-struct SignedMessage<M: NetworkMessage> {
+pub(super) struct SignedMessage<M: NetworkMessage> {
     from: EndpointId,
     data: Bytes,
     signature: Signature,
