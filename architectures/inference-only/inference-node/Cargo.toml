@@ -66,3 +66,6 @@ windows-sys = { version = "0.61.2", features = [
 
 [dev-dependencies]
 tempfile = "3.25.0"
+# Gateway and protocol tests do not execute tensor code. This keeps their
+# binaries GPU-free while the legacy network crate still defaults to training.
+tch = { workspace = true, features = ["doc-only"] }
