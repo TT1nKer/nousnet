@@ -19,10 +19,7 @@ use axum::{
 };
 use clap::Parser;
 use iroh::EndpointAddr;
-use iroh::EndpointId;
-use psyche_inference::{
-    InferenceGossipMessage, InferenceMessage, InferenceRequest, InferenceResponse, INFERENCE_ALPN,
-};
+use psyche_inference::InferenceGossipMessage;
 use psyche_inference_node::gateway::{
     auth::ApiKeyAuthenticator,
     http::{
@@ -31,6 +28,7 @@ use psyche_inference_node::gateway::{
     routing::{load_endpoint_allowlist, NodeRecord},
 };
 use psyche_inference_node::p2p::{DiscoveryMode, InferenceNetwork, PeerAllowlist, RelayKind};
+use psyche_inference_node::p2p_client::{send_inference_request, P2PRequestError};
 use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{sync::mpsc, time::sleep};
 use tokio_util::sync::CancellationToken;
@@ -191,60 +189,6 @@ async fn main() -> Result<()> {
     run_gateway().await
 }
 
-async fn send_inference_request(
-    endpoint: iroh::Endpoint,
-    peer_id: EndpointId,
-    request: InferenceRequest,
-) -> Result<InferenceResponse> {
-    info!(
-        "Connecting to peer {} with ALPN {:?}",
-        peer_id.fmt_short(),
-        std::str::from_utf8(INFERENCE_ALPN)
-    );
-
-    // connect to peer and open bidirectional stream
-    let connection = endpoint
-        .connect(peer_id, INFERENCE_ALPN)
-        .await
-        .context("Failed to connect to peer")?;
-
-    info!("Connected, opening bidirectional stream");
-    let (mut send, mut recv) = connection
-        .open_bi()
-        .await
-        .context("Failed to open bidirectional stream")?;
-
-    let message = InferenceMessage::Request(request);
-    let request_bytes =
-        postcard::to_allocvec(&message).context("Failed to serialize inference request")?;
-
-    info!("Sending {} bytes", request_bytes.len());
-    send.write_all(&request_bytes)
-        .await
-        .context("Failed to write request")?;
-
-    info!("Finishing send stream");
-    send.finish()?;
-
-    info!("Reading response...");
-    let response_bytes = recv
-        .read_to_end(10 * 1024 * 1024)
-        .await
-        .context("Failed to read response")?; // 10MB max
-
-    info!("Received {} bytes, deserializing", response_bytes.len());
-    let response_message: InferenceMessage = postcard::from_bytes(&response_bytes)
-        .context("Failed to deserialize inference response")?;
-
-    match response_message {
-        InferenceMessage::Response(response) => {
-            info!("Successfully received inference response");
-            Ok(response)
-        }
-        _ => anyhow::bail!("Unexpected message type from inference node"),
-    }
-}
-
 async fn run_gateway() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -385,24 +329,22 @@ async fn run_gateway() -> Result<()> {
                         let endpoint = network.endpoint();
                         let state_clone = state.clone();
                         task_set.spawn(async move {
-                            let result = tokio::time::timeout(
+                            let result = send_inference_request(
+                                endpoint,
+                                target_peer_id,
+                                routed_request.request,
                                 P2P_REQUEST_TIMEOUT,
-                                send_inference_request(
-                                    endpoint,
-                                    target_peer_id,
-                                    routed_request.request,
-                                ),
                             )
                             .await;
 
                             match result {
-                                Ok(Ok(response)) => {
+                                Ok(response) => {
                                     info!("Received inference response for {}", request_id);
                                     state_clone
                                         .complete_request(&request_id, Ok(response))
                                         .await;
                                 }
-                                Ok(Err(error)) => {
+                                Err(P2PRequestError::Request(error)) => {
                                     error!("Inference P2P request failed: {error:#}");
                                     state_clone
                                         .complete_request(
@@ -411,7 +353,7 @@ async fn run_gateway() -> Result<()> {
                                         )
                                         .await;
                                 }
-                                Err(_) => {
+                                Err(P2PRequestError::DeadlineElapsed) => {
                                     error!("Inference request {} timed out", request_id);
                                     state_clone
                                         .complete_request(&request_id, Err(GatewayFailure::Timeout))

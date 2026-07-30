@@ -8,6 +8,7 @@ pub mod gateway;
 pub mod identity;
 pub mod node_cli;
 pub mod p2p;
+pub mod p2p_client;
 
 /// Fetch the gateway's endpoint address via its HTTP `/bootstrap` endpoint.
 pub async fn fetch_bootstrap_peer(gateway_url: &str) -> Result<EndpointAddr> {
