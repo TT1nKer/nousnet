@@ -70,3 +70,78 @@ jobs:
           cargo check -p psyche-inference-node \
             --no-default-features --features ollama \
             --bin psyche-inference-node
+
+  windows-artifact:
+    needs: ollama-only
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select stable Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          cargo --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target
+          key: inference-windows-${{ hashFiles('Cargo.lock', 'architectures/inference-only/inference-node/Cargo.toml', 'shared/inference/Cargo.toml') }}
+
+      - name: Test Ollama-only inference on Windows
+        shell: pwsh
+        run: |
+          cargo test -p psyche-inference `
+            --locked --no-default-features --features ollama `
+            --release
+          cargo test -p psyche-inference-node `
+            --locked --no-default-features --features ollama `
+            --release
+
+      - name: Build Windows release binaries
+        shell: pwsh
+        run: |
+          cargo build -p psyche-inference-node `
+            --locked --no-default-features --features ollama `
+            --release `
+            --bin gateway-node `
+            --bin psyche-inference-node
+
+      - name: Package binaries and SHA-256
+        shell: pwsh
+        run: |
+          $artifactDirectory = "inference-windows-x86_64"
+          New-Item -ItemType Directory -Path $artifactDirectory | Out-Null
+          $binaries = @(
+            "gateway-node.exe",
+            "psyche-inference-node.exe"
+          )
+          foreach ($binary in $binaries) {
+            Copy-Item "target/release/$binary" $artifactDirectory
+          }
+          $hashLines = foreach ($binary in $binaries) {
+            $hash = (Get-FileHash "$artifactDirectory/$binary" -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $binary"
+          }
+          Set-Content -Path "$artifactDirectory/SHA256SUMS.txt" `
+            -Value $hashLines `
+            -Encoding ascii
+          Get-Content "$artifactDirectory/SHA256SUMS.txt"
+
+      - name: Upload tested Windows binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: inference-windows-x86_64-${{ github.sha }}
+          path: inference-windows-x86_64
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
