@@ -1,8 +1,9 @@
-# Koinon marketplace service
+# TTinker Grid marketplace service
 
-This directory owns the public TTinker Grid product surface while the product
-is being incorporated into Koinon. The public name and deployment paths remain
-unchanged for compatibility.
+This directory owns the public TTinker Grid product surface and its
+compatibility control plane. Grid and Koinon are layers of the same distributed
+compute system: Koinon executes work, while Grid coordinates supply, demand,
+measurement, reputation, pricing, and settlement.
 
 Static prototype for the open inference market concept.
 
@@ -37,3 +38,7 @@ deployed prototype. New execution features should be added to the Koinon
 inference runtime instead of creating a second router here. The eventual
 integration boundary is a read-only marketplace status adapter backed by the
 Koinon gateway.
+
+See the project [vision](../../docs/vision.md) and
+[roadmap](../../docs/roadmap.md) for the approved system boundaries and current
+delivery order.
