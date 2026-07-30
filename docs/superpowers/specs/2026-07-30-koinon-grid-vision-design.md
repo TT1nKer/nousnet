@@ -169,10 +169,12 @@ non-streaming request.
 ## Authentication and trust
 
 - Gateway HTTP requires a Bearer API key loaded from environment or a
-  permission-restricted file. Comparison is constant-time and neither the key
-  nor its prefix is logged.
+  permission-restricted file. M1 implements the environment source.
+  Comparison is constant-time and neither the key nor its prefix is logged.
 - M1 gateway configuration contains an explicit allowlist of persistent iroh
   Endpoint IDs. An empty allowlist cannot serve inference.
+- M1 nodes accept inference connections only from the configured gateway
+  Endpoint IDs. An empty gateway peer list cannot start an inference node.
 - Gossip discovery supplies reachability and health only. It never grants
   authorization.
 - Grid's existing `tg_node_` heartbeat credential remains a compatibility
@@ -185,8 +187,8 @@ non-streaming request.
 
 The external gateway maps normalized failures as follows:
 
-- `400 Bad Request`: malformed input, unsupported streaming, invalid bounds, or
-  unknown model;
+- `400 Bad Request`: malformed input, a missing or invalid model identifier,
+  unsupported streaming, or invalid bounds;
 - `401 Unauthorized`: missing or invalid API key;
 - `503 Service Unavailable`: no allowed ready node for the requested model;
 - `502 Bad Gateway`: backend rejection, malformed backend response, or P2P
