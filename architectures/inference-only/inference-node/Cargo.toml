@@ -44,6 +44,7 @@ reqwest = { version = "0.12", features = ["json"] }
 rand.workspace = true
 serde_json.workspace = true
 serde.workspace = true
+subtle = "2.6.1"
 uuid = { version = "1", features = ["v4"] }
 pyo3 = { workspace = true, optional = true }
 postcard.workspace = true

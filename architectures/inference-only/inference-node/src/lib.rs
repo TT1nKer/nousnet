@@ -3,6 +3,7 @@ use iroh::EndpointAddr;
 use std::{fs, path::PathBuf};
 use tracing::info;
 
+pub mod gateway;
 pub mod identity;
 pub mod node_cli;
 
