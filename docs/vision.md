@@ -72,20 +72,25 @@ provider-specific behavior into the gateway or Grid.
 The repository already contains:
 
 - an iroh-based inference network and direct request protocol;
-- an OpenAI-compatible gateway endpoint;
-- a vLLM-backed inference node;
-- stale-node cleanup and bounded P2P reads;
+- a Bearer-authenticated OpenAI-compatible gateway endpoint;
+- provider-neutral lifecycle and execution boundaries with Ollama and vLLM
+  backends;
+- persistent P2P identities, mandatory bidirectional allowlists, exact model
+  routing, stale-node cleanup, and bounded P2P reads;
+- GPU-free local P2P integration coverage and a Windows Ollama-only release
+  build verified with `qwen3:8b` on an RTX 3080;
 - a Grid marketplace prototype with applications, node credentials, heartbeat
   discovery, and an explicitly unavailable inference status;
-- a locally validated Ollama `qwen3:8b` model on an RTX 3080.
+- conservative single-request admission and configurable model resource
+  release.
 
 The repository does not yet contain:
 
-- authenticated public gateway access;
-- persistent, allowlisted P2P node identities;
-- an Ollama execution backend in the Rust node;
-- exact model routing and production error contracts;
 - an end-to-end Grid-to-Koinon source of truth;
+- registration that binds Grid nodes to persistent Koinon Endpoint IDs;
+- revocable user API-key lifecycle or a signed, visible node client;
+- streaming, end-to-end cancellation, cross-node retries, or multi-node
+  scheduling;
 - authoritative metering, pricing, reputation, or settlement.
 
 The [roadmap](roadmap.md) orders work so that documentation and product claims

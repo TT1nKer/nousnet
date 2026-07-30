@@ -2,9 +2,10 @@
 
 ## Current goal
 
-Deliver M1: a consent-first, authenticated, single-node inference path from an
-OpenAI-compatible client through the Koinon gateway and outbound iroh P2P to a
-manually enabled Ollama model.
+Deliver M2: make the Koinon gateway's executable node state the authoritative
+source for Grid registration and availability, then retire the marketplace's
+compatibility heartbeat view without turning Grid into a second inference
+router.
 
 ## Completed
 
@@ -16,25 +17,40 @@ manually enabled Ollama model.
 - Approved the Koinon/Grid/Psyche system vision and layered architecture.
 - Completed M0 documentation: vision, current-state claims, boundaries, and
   milestone definitions.
+- Added a provider-neutral asynchronous inference runtime and a localhost-only
+  Ollama backend while preserving the existing vLLM path.
+- Added persistent node identity, mandatory gateway and node allowlists,
+  gateway Bearer authentication, exact model routing, bounded requests, and
+  explicit HTTP failure contracts.
+- Added a GPU-free local P2P acceptance test and Windows CI coverage for both
+  inference crates and release binaries.
+- Completed M1 acceptance on Windows with `qwen3:8b` and an RTX 3080: one
+  authenticated request traversed the gateway and iroh P2P path and returned
+  HTTP 200 in 3.441 seconds including a 2.27-second cold load.
+- Verified that Ollama remained bound to `127.0.0.1`, operational logs did not
+  contain the acceptance prompt or response, the stale node became unavailable
+  with HTTP 503, GPU inference processes exited, no firewall rule was added,
+  and both experimental scheduled tasks remained disabled.
 
 ## In progress
 
-- Converting the approved M1 design into a test-driven implementation plan.
-- Defining persistent node identity, gateway allowlisting, API authentication,
-  and provider-neutral execution boundaries.
+- Mapping the Grid registration and heartbeat call path to the gateway's
+  signed, model-specific node state.
+- Defining the smallest read-only status adapter and compatibility migration
+  that preserve the execution/economic-layer boundary.
 
 ## Next steps
 
-1. Add a tested asynchronous inference backend boundary.
-2. Add an Ollama backend with bounded input, output, and timeouts.
-3. Persist the node's iroh identity with user-only storage permissions.
-4. Require an explicit gateway node allowlist.
-5. Add gateway API authentication and exact model selection.
-6. Run an automated local P2P integration test without a GPU.
-7. Run one manual Windows RTX 3080 acceptance request, then return the node to
-   `Disabled`.
-8. Replace Grid's compatibility heartbeat status with a read-only gateway
-   status adapter.
+1. Locate the Grid registration, credential, and compatibility heartbeat
+   boundaries and the gateway's authoritative node-state interface.
+2. Define a read-only adapter that reports only signed, allowlisted, non-stale
+   capacity and never accepts execution commands.
+3. Bind Grid registrations to persistent Koinon Endpoint IDs.
+4. Add behavior-focused tests for unknown, unauthorized, stale, and
+   model-mismatched nodes.
+5. Migrate marketplace availability reads to the adapter while keeping the
+   legacy heartbeat explicitly non-authoritative during a bounded transition.
+6. Add revocable user API-key lifecycle without exposing credentials to Grid.
 
 ## Milestones
 
@@ -48,17 +64,18 @@ boundary.
 
 ### M1 — Safe single-node inference
 
-Status: next implementation milestone.
+Status: completed.
 
 The gateway authenticates clients, selects an explicitly allowed node with the
 requested model, sends a bounded P2P request, and returns an OpenAI-compatible
 response. The node is manually enabled, uses an Ollama or vLLM backend, admits
 one request at a time by default, and releases resources according to the
-user-selected policy.
+configured policy. GPU-free integration tests and a Windows RTX 3080 acceptance
+run verified the production-shaped Ollama path and its shutdown behavior.
 
 ### M2 — Authoritative Grid control plane
 
-Status: planned.
+Status: in progress.
 
 Grid registration binds a node identity to its persistent Koinon endpoint.
 Marketplace status is backed by gateway state, user API keys can be revoked,
@@ -92,10 +109,11 @@ can then enter Grid as another measured workload.
 
 ## Blockers
 
-There is no blocker for local M1 development. Public node enrollment and
-production economic claims remain blocked until persistent signed node
-identity, a visible node client, authoritative metering, and the Grid status
-adapter are complete.
+There is no blocker for local M2 development. Public node enrollment remains
+blocked until registration is bound to persistent signed node identity and a
+visible node client exists. Production economic claims remain blocked until
+the Grid status adapter, authoritative metering, revocation, and dispute
+handling are complete.
 
 ## Related files
 
