@@ -1,11 +1,56 @@
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use iroh::EndpointId;
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet},
+    fs::File,
+    io::Read,
+    path::Path,
     time::{Duration, Instant},
 };
 
 const STALE_AFTER: Duration = Duration::from_secs(90);
+const MAX_ALLOWLIST_BYTES: u64 = 1024 * 1024;
+
+pub fn load_endpoint_allowlist(path: &Path) -> Result<HashSet<EndpointId>> {
+    let file = File::open(path)
+        .with_context(|| format!("failed to open gateway allowlist {}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("failed to inspect gateway allowlist {}", path.display()))?;
+    ensure!(
+        metadata.is_file(),
+        "gateway allowlist must be a regular file"
+    );
+    ensure!(
+        metadata.len() <= MAX_ALLOWLIST_BYTES,
+        "gateway allowlist exceeds 1 MiB"
+    );
+
+    let mut contents = Vec::new();
+    file.take(MAX_ALLOWLIST_BYTES + 1)
+        .read_to_end(&mut contents)
+        .with_context(|| format!("failed to read gateway allowlist {}", path.display()))?;
+    ensure!(
+        contents.len() as u64 <= MAX_ALLOWLIST_BYTES,
+        "gateway allowlist exceeds 1 MiB"
+    );
+    let encoded_ids: Vec<String> = serde_json::from_slice(&contents)
+        .context("gateway allowlist must be a JSON string array")?;
+    ensure!(
+        !encoded_ids.is_empty(),
+        "gateway endpoint allowlist must not be empty"
+    );
+
+    encoded_ids
+        .into_iter()
+        .enumerate()
+        .map(|(index, encoded_id)| {
+            encoded_id
+                .parse()
+                .with_context(|| format!("invalid endpoint ID at allowlist index {index}"))
+        })
+        .collect()
+}
 
 #[derive(Clone, Debug)]
 pub struct NodeRecord {
@@ -112,7 +157,7 @@ impl NodeCatalog {
 mod tests {
     use super::*;
     use iroh::SecretKey;
-    use std::{collections::HashSet, time::Duration};
+    use std::{collections::HashSet, fs, time::Duration};
 
     fn endpoint_id(seed: u8) -> EndpointId {
         SecretKey::from_bytes(&[seed; 32]).public()
@@ -176,5 +221,26 @@ mod tests {
         assert_eq!(catalog.select("qwen3:8b", now), Some(first));
         assert_eq!(catalog.select("qwen3:8b", now), Some(second));
         assert_eq!(catalog.select("qwen3:8b", now), Some(first));
+    }
+
+    #[test]
+    fn loads_only_nonempty_valid_endpoint_id_arrays() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("allowed-peers.json");
+        let allowed = endpoint_id(1);
+        fs::write(
+            &path,
+            serde_json::to_vec(&vec![allowed.to_string()]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            load_endpoint_allowlist(&path).unwrap(),
+            HashSet::from([allowed])
+        );
+
+        fs::write(&path, "[]").unwrap();
+        assert!(load_endpoint_allowlist(&path).is_err());
+        fs::write(&path, r#"["not-an-endpoint-id"]"#).unwrap();
+        assert!(load_endpoint_allowlist(&path).is_err());
     }
 }

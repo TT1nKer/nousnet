@@ -10,32 +10,40 @@
 
 use anyhow::{Context, Result};
 use axum::{
-    Json, Router,
-    extract::State,
-    http::StatusCode,
+    extract::{Request, State},
+    http::{HeaderMap, StatusCode},
+    middleware::Next,
     response::{IntoResponse, Response},
     routing::{get, post},
+    Json, Router,
 };
 use clap::Parser;
 use iroh::EndpointAddr;
 use psyche_inference::{
-    INFERENCE_ALPN, InferenceGossipMessage, InferenceMessage, InferenceRequest, InferenceResponse,
+    InferenceGossipMessage, InferenceMessage, InferenceRequest, InferenceResponse, INFERENCE_ALPN,
+};
+use psyche_inference_node::gateway::{
+    auth::ApiKeyAuthenticator,
+    http::{
+        build_gateway_router, GatewayFailure, GatewayState, RoutedInferenceRequest, REQUEST_TIMEOUT,
+    },
+    routing::{load_endpoint_allowlist, NodeRecord},
 };
 use psyche_metrics::ClientMetrics;
 use psyche_network::{
-    DiscoveryMode, EndpointId, NetworkConnection, NetworkEvent, RelayKind, allowlist,
+    allowlist, DiscoveryMode, EndpointId, NetworkConnection, NetworkEvent, RelayKind,
 };
-use std::{collections::HashMap, fs, path::PathBuf, sync::Arc, time::Duration};
-use tokio::{
-    sync::{RwLock, mpsc},
-    time::sleep,
-};
+use std::{fs, path::PathBuf, sync::Arc, time::Duration};
+use tokio::{sync::mpsc, time::sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
+use zeroize::Zeroizing;
+
+const P2P_REQUEST_TIMEOUT: Duration = Duration::from_secs(29);
 
 #[derive(Parser, Debug)]
 struct Args {
-    #[arg(long, default_value = "0.0.0.0:8000")]
+    #[arg(long, default_value = "127.0.0.1:8000")]
     listen_addr: String,
 
     /// what discovery to use - public n0 or local
@@ -49,57 +57,18 @@ struct Args {
     #[arg(long)]
     bootstrap_peer_file: Option<PathBuf>,
 
+    /// JSON array of inference node Endpoint IDs authorized by this gateway.
+    #[arg(long)]
+    allowed_peer_file: PathBuf,
+
     #[arg(long)]
     write_endpoint_file: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug)]
-struct InferenceNodeInfo {
-    peer_id: EndpointId,
-    model_name: Option<String>,
-    #[allow(dead_code)]
-    checkpoint_id: Option<String>,
-    #[allow(dead_code)]
-    capabilities: Vec<String>,
-    last_seen: std::time::Instant,
-}
-
-struct GatewayState {
-    available_nodes: RwLock<HashMap<EndpointId, InferenceNodeInfo>>,
-    pending_requests: RwLock<HashMap<String, mpsc::Sender<InferenceResponse>>>,
-    network_tx: mpsc::Sender<(EndpointId, InferenceMessage)>,
+#[derive(Clone)]
+struct GatewayAdminState {
     gossip_tx: mpsc::Sender<InferenceGossipMessage>,
     endpoint_addr: EndpointAddr,
-}
-
-#[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
-struct ChatMessage {
-    role: String,
-    content: String,
-}
-
-#[derive(serde::Deserialize)]
-struct ChatCompletionRequest {
-    model: Option<String>,
-    messages: Vec<ChatMessage>,
-    #[serde(default = "default_max_tokens")]
-    max_tokens: Option<usize>,
-    #[serde(default = "default_temperature")]
-    temperature: Option<f64>,
-    #[serde(default = "default_top_p")]
-    top_p: Option<f64>,
-    #[serde(default)]
-    stream: bool,
-}
-
-fn default_max_tokens() -> Option<usize> {
-    Some(100)
-}
-fn default_temperature() -> Option<f64> {
-    Some(1.0)
-}
-fn default_top_p() -> Option<f64> {
-    Some(1.0)
 }
 
 #[derive(serde::Deserialize, Debug, Clone)]
@@ -121,123 +90,11 @@ struct LoadModelRequest {
     source: LoadModelSource,
 }
 
-#[derive(serde::Serialize)]
-struct ChatCompletionChoice {
-    index: usize,
-    message: ChatMessage,
-    finish_reason: Option<String>,
-}
-
-#[derive(serde::Serialize)]
-struct ChatCompletionResponse {
-    id: String,
-    object: String,
-    created: u64,
-    model: String,
-    choices: Vec<ChatCompletionChoice>,
-    // we're omitting usage stats for now
-}
-
-#[axum::debug_handler]
-async fn handle_inference(
-    State(state): State<Arc<GatewayState>>,
-    Json(req): Json<ChatCompletionRequest>,
-) -> Result<Json<ChatCompletionResponse>, AppError> {
-    let nodes = state.available_nodes.read().await;
-
-    let nodes_with_model: Vec<(EndpointId, String)> = nodes
-        .values()
-        .filter_map(|n| Some((n.peer_id, n.model_name.clone()?)))
-        .collect();
-
-    if nodes_with_model.is_empty() {
-        // No nodes have models loaded yet
-        return Err(AppError::NoNodesAvailable);
-    }
-
-    // Select first available node with a model
-    // TODO: Add load balancing and model-specific routing in the future
-    let (target_peer_id, node_model_name) = &nodes_with_model[0];
-    let target_peer_id = *target_peer_id;
-
-    let model_name = req.model.clone().unwrap_or_else(|| node_model_name.clone());
-
-    info!(
-        "Routing request to node: {} (model: {})",
-        target_peer_id.fmt_short(),
-        node_model_name
-    );
-    drop(nodes);
-
-    let messages: Vec<psyche_inference::ChatMessage> = req
-        .messages
-        .iter()
-        .map(|m| psyche_inference::ChatMessage {
-            role: m.role.clone(),
-            content: m.content.clone(),
-        })
-        .collect();
-
-    let request_id = uuid::Uuid::new_v4().to_string();
-    let inference_req = InferenceRequest {
-        request_id: request_id.clone(),
-        messages,
-        max_tokens: req.max_tokens.unwrap_or(100),
-        temperature: req.temperature.unwrap_or(1.0),
-        top_p: req.top_p.unwrap_or(1.0),
-        stream: req.stream,
-    };
-
-    let (tx, mut rx) = mpsc::channel(1);
-
-    state
-        .pending_requests
-        .write()
-        .await
-        .insert(request_id.clone(), tx);
-
-    let msg = InferenceMessage::Request(inference_req);
-    if let Err(e) = state.network_tx.send((target_peer_id, msg)).await {
-        error!("Failed to send inference request: {:#}", e);
-        state.pending_requests.write().await.remove(&request_id);
-        return Err(AppError::InternalError);
-    }
-
-    info!("Sent inference request {} to network", request_id);
-
-    let response = tokio::time::timeout(Duration::from_secs(30), rx.recv())
-        .await
-        .map_err(|_| AppError::Timeout)?
-        .ok_or(AppError::InternalError)?;
-
-    state.pending_requests.write().await.remove(&request_id);
-
-    let created = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-
-    Ok(Json(ChatCompletionResponse {
-        id: format!("chatcmpl-{}", response.request_id),
-        object: "chat.completion".to_string(),
-        created,
-        model: model_name,
-        choices: vec![ChatCompletionChoice {
-            index: 0,
-            message: ChatMessage {
-                role: "assistant".to_string(),
-                content: response.generated_text,
-            },
-            finish_reason: response.finish_reason,
-        }],
-    }))
-}
-
 #[axum::debug_handler]
 async fn handle_load_model(
-    State(state): State<Arc<GatewayState>>,
+    State(state): State<Arc<GatewayAdminState>>,
     Json(req): Json<LoadModelRequest>,
-) -> Result<String, AppError> {
+) -> Result<String, AdminError> {
     use psyche_inference::ModelSource;
 
     info!(
@@ -260,7 +117,7 @@ async fn handle_load_model(
 
     state.gossip_tx.send(load_msg).await.map_err(|e| {
         error!("Failed to broadcast LoadModel message: {:#}", e);
-        AppError::InternalError
+        AdminError::DispatchUnavailable
     })?;
 
     info!(
@@ -274,7 +131,7 @@ async fn handle_load_model(
 }
 
 #[axum::debug_handler]
-async fn handle_bootstrap(State(state): State<Arc<GatewayState>>) -> Json<EndpointAddr> {
+async fn handle_bootstrap(State(state): State<Arc<GatewayAdminState>>) -> Json<EndpointAddr> {
     info!(
         "Bootstrap request: returning endpoint addr {}",
         state.endpoint_addr.id.fmt_short()
@@ -283,29 +140,51 @@ async fn handle_bootstrap(State(state): State<Arc<GatewayState>>) -> Json<Endpoi
 }
 
 #[derive(Debug)]
-enum AppError {
-    NoNodesAvailable,
-    Timeout,
-    InternalError,
+enum AdminError {
+    Unauthorized,
+    DispatchUnavailable,
 }
 
-impl IntoResponse for AppError {
+impl IntoResponse for AdminError {
     fn into_response(self) -> Response {
-        let (status, message) = match self {
-            AppError::NoNodesAvailable => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "No inference nodes available".to_string(),
+        let (status, code, message) = match self {
+            Self::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                "invalid_api_key",
+                "A valid Bearer API key is required.",
             ),
-            AppError::Timeout => (
-                StatusCode::GATEWAY_TIMEOUT,
-                "Inference request timed out".to_string(),
-            ),
-            AppError::InternalError => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal server error".to_string(),
+            Self::DispatchUnavailable => (
+                StatusCode::BAD_GATEWAY,
+                "dispatch_unavailable",
+                "The gateway could not dispatch the administrative request.",
             ),
         };
-        (status, message).into_response()
+        (
+            status,
+            Json(serde_json::json!({
+                "error": {
+                    "message": message,
+                    "type": "gateway_error",
+                    "code": code,
+                }
+            })),
+        )
+            .into_response()
+    }
+}
+
+async fn require_admin_authentication(
+    State(authenticator): State<ApiKeyAuthenticator>,
+    headers: HeaderMap,
+    request: Request,
+    next: Next,
+) -> Response {
+    match headers
+        .get("authorization")
+        .filter(|header| authenticator.authorize(header))
+    {
+        Some(_) => next.run(request).await,
+        None => AdminError::Unauthorized.into_response(),
     }
 }
 
@@ -377,16 +256,28 @@ async fn run_gateway() -> Result<()> {
         .init();
 
     let args = Args::parse();
+    let api_key = Zeroizing::new(
+        std::env::var("KOINON_GATEWAY_API_KEY").context("KOINON_GATEWAY_API_KEY must be set")?,
+    );
+    let authenticator = ApiKeyAuthenticator::from_secret(&api_key)?;
+    let allowed_endpoint_ids = load_endpoint_allowlist(&args.allowed_peer_file)?;
 
     info!("Starting gateway node");
     info!("  HTTP API: http://{}", args.listen_addr);
     info!("  Discovery mode: {:?}", args.discovery_mode);
     info!("  Relay kind: {:?}", args.relay_kind);
+    info!(
+        "  Authorized inference nodes: {}",
+        allowed_endpoint_ids.len()
+    );
 
     let bootstrap_peers = psyche_inference_node::load_bootstrap_peers(
         args.bootstrap_peer_file.as_ref(),
         "No bootstrap peers configured (gateway will be a bootstrap node)",
     )?;
+    let mut transport_endpoint_ids = allowed_endpoint_ids.clone();
+    transport_endpoint_ids.extend(bootstrap_peers.iter().map(|peer| peer.id));
+    let transport_allowlist = allowlist::AllowDynamic::with_nodes(transport_endpoint_ids);
 
     let cancel = CancellationToken::new();
 
@@ -404,7 +295,7 @@ async fn run_gateway() -> Result<()> {
         args.relay_kind,
         bootstrap_peers,
         None,
-        allowlist::AllowAll,
+        transport_allowlist,
         metrics.clone(),
         Some(cancel.clone()),
     )
@@ -414,7 +305,6 @@ async fn run_gateway() -> Result<()> {
     info!("P2P network initialized");
     info!("  Endpoint ID: {}", network.endpoint_id());
 
-    // write endpoint to file if requested
     let endpoint_file = if let Ok(file_path) = std::env::var("PSYCHE_GATEWAY_ENDPOINT_FILE") {
         info!("Found PSYCHE_GATEWAY_ENDPOINT_FILE env var: {}", file_path);
         Some(PathBuf::from(file_path))
@@ -424,7 +314,7 @@ async fn run_gateway() -> Result<()> {
     };
 
     let endpoint_addr = network.router().endpoint().addr();
-    let endpoints = vec![endpoint_addr];
+    let endpoints = vec![endpoint_addr.clone()];
 
     if let Some(ref endpoint_file) = endpoint_file {
         let content =
@@ -444,15 +334,18 @@ async fn run_gateway() -> Result<()> {
 
     info!("Gossip mesh should be ready");
 
-    let (network_tx, mut network_rx) = mpsc::channel::<(EndpointId, InferenceMessage)>(100);
+    let (request_tx, mut request_rx) = mpsc::channel::<RoutedInferenceRequest>(100);
+    let (cleanup_tx, mut cleanup_rx) = mpsc::unbounded_channel::<String>();
     let (gossip_tx, mut gossip_rx) = mpsc::channel::<InferenceGossipMessage>(100);
 
-    let endpoint_addr = network.router().endpoint().addr();
-
-    let state = Arc::new(GatewayState {
-        available_nodes: RwLock::new(HashMap::new()),
-        pending_requests: RwLock::new(HashMap::new()),
-        network_tx,
+    let state = Arc::new(GatewayState::new(
+        authenticator.clone(),
+        allowed_endpoint_ids,
+        request_tx,
+        cleanup_tx,
+        REQUEST_TIMEOUT,
+    )?);
+    let admin_state = Arc::new(GatewayAdminState {
         gossip_tx,
         endpoint_addr,
     });
@@ -479,75 +372,70 @@ async fn run_gateway() -> Result<()> {
                     }
 
                     _ = cleanup_interval.tick() => {
-                        let stale_threshold = Duration::from_secs(90);
-                        let mut nodes = state.available_nodes.write().await;
                         let now = std::time::Instant::now();
-
-                        let stale_nodes: Vec<(EndpointId, Duration)> = nodes
-                            .iter()
-                            .filter_map(|(id, info)| {
-                                let age = now.duration_since(info.last_seen);
-                                if age > stale_threshold {
-                                    Some((*id, age))
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect();
-
-                        for (node_id, age) in stale_nodes {
-                            warn!("Removing stale node {} (no heartbeat for {:?})", node_id.fmt_short(), age);
-                            nodes.remove(&node_id);
+                        for node_id in state.remove_stale_nodes(now) {
+                            warn!("Removing stale node {}", node_id.fmt_short());
                         }
                     }
 
-                    Some((target_peer_id, msg)) = network_rx.recv() => {
-                        match msg {
-                            InferenceMessage::Request(req) => {
-                                let request_id = req.request_id.clone();
-                                info!("Sending inference request {} to {} via direct P2P",
-                                      request_id, target_peer_id.fmt_short());
-
-                                let endpoint = network.router().endpoint().clone();
-                                let state_clone = state.clone();
-                                task_set.spawn(async move {
-                                    // timeout slightly longer than HTTP handler timeout (30s) to avoid race - might need to adjust
-                                    let result = tokio::time::timeout(
-                                        Duration::from_secs(35),
-                                        send_inference_request(endpoint, target_peer_id, req)
-                                    ).await;
-
-                                    match result {
-                                        Ok(Ok(response)) => {
-                                            info!("Received inference response for {}", request_id);
-                                            if let Some(tx) = state_clone.pending_requests.write().await.remove(&request_id) {
-                                                let _ = tx.send(response).await;
-                                            }
-                                        }
-                                        Ok(Err(e)) => {
-                                            error!("Failed to send inference request: {:#}", e);
-                                            state_clone.pending_requests.write().await.remove(&request_id);
-                                        }
-                                        Err(_) => {
-                                            error!("Inference request {} timed out after 35s", request_id);
-                                            state_clone.pending_requests.write().await.remove(&request_id);
-                                        }
-                                    }
-                                });
-                            }
-                            _ => continue,
-                        };
+                    Some(request_id) = cleanup_rx.recv() => {
+                        state.remove_pending_request(&request_id).await;
                     }
 
-                    Some(_) = task_set.join_next(), if !task_set.is_empty() => {
+                    Some(routed_request) = request_rx.recv() => {
+                        let request_id = routed_request.request.request_id.clone();
+                        let target_peer_id = routed_request.endpoint_id;
+                        info!("Sending inference request {} to {} via direct P2P",
+                              request_id, target_peer_id.fmt_short());
+
+                        let endpoint = network.router().endpoint().clone();
+                        let state_clone = state.clone();
+                        task_set.spawn(async move {
+                            let result = tokio::time::timeout(
+                                P2P_REQUEST_TIMEOUT,
+                                send_inference_request(
+                                    endpoint,
+                                    target_peer_id,
+                                    routed_request.request,
+                                ),
+                            )
+                            .await;
+
+                            match result {
+                                Ok(Ok(response)) => {
+                                    info!("Received inference response for {}", request_id);
+                                    state_clone
+                                        .complete_request(&request_id, Ok(response))
+                                        .await;
+                                }
+                                Ok(Err(error)) => {
+                                    error!("Inference P2P request failed: {error:#}");
+                                    state_clone
+                                        .complete_request(
+                                            &request_id,
+                                            Err(GatewayFailure::NodeExecution),
+                                        )
+                                        .await;
+                                }
+                                Err(_) => {
+                                    error!("Inference request {} timed out", request_id);
+                                    state_clone
+                                        .complete_request(&request_id, Err(GatewayFailure::Timeout))
+                                        .await;
+                                }
+                            }
+                        });
+                    }
+
+                    Some(result) = task_set.join_next(), if !task_set.is_empty() => {
+                        if let Err(error) = result {
+                            error!("P2P request task failed: {error}");
+                        }
                     }
 
                     Some(gossip_msg) = gossip_rx.recv() => {
-                        info!("Broadcasting gossip message: {:?}", gossip_msg);
                         if let Err(e) = network.broadcast(&gossip_msg) {
                             error!("Failed to broadcast gossip message: {:#}", e);
-                        } else {
-                            info!("Successfully broadcasted gossip message");
                         }
                     }
 
@@ -556,33 +444,28 @@ async fn run_gateway() -> Result<()> {
                             Ok(Some(NetworkEvent::MessageReceived((peer_id, msg)))) => {
                                 info!("Received gossip message from {}", peer_id.fmt_short());
                                 match msg {
-                                    InferenceGossipMessage::NodeAvailable { model_name, checkpoint_id, capabilities, timestamp_ms: _ } => {
-                                        let is_new = !state.available_nodes.read().await.contains_key(&peer_id);
-
-                                        if is_new {
-                                            info!("Discovered NEW inference node!");
-                                            info!("  Peer ID: {}", peer_id.fmt_short());
-                                            info!("  Model: {}", model_name.as_deref().unwrap_or("<idle>"));
-                                            info!("  Checkpoint: {:?}", checkpoint_id);
-                                            info!("  Capabilities: {:?}", capabilities);
-                                        } else {
+                                    InferenceGossipMessage::NodeAvailable {
+                                        model_name,
+                                        checkpoint_id: _,
+                                        capabilities: _,
+                                        timestamp_ms: _,
+                                    } => {
+                                        let accepted = state.upsert_node(NodeRecord {
+                                            endpoint_id: peer_id,
+                                            model_name: model_name.clone(),
+                                            last_seen: std::time::Instant::now(),
+                                        });
+                                        if accepted {
                                             info!("Heartbeat from {} (model: {})",
                                                 peer_id.fmt_short(),
                                                 model_name.as_deref().unwrap_or("<idle>"));
+                                        } else {
+                                            warn!("Ignoring unauthorized node {}", peer_id.fmt_short());
                                         }
-
-                                        let node_info = InferenceNodeInfo {
-                                            peer_id,
-                                            model_name,
-                                            checkpoint_id,
-                                            capabilities,
-                                            last_seen: std::time::Instant::now(),
-                                        };
-                                        state.available_nodes.write().await.insert(peer_id, node_info);
                                     }
                                     InferenceGossipMessage::NodeUnavailable => {
                                         info!("Inference node {} went offline", peer_id.fmt_short());
-                                        state.available_nodes.write().await.remove(&peer_id);
+                                        state.remove_node(&peer_id);
                                     }
                                     InferenceGossipMessage::LoadModel { .. } => {
                                         debug!("Ignoring LoadModel message (gateways don't load models)");
@@ -606,11 +489,15 @@ async fn run_gateway() -> Result<()> {
         })
     };
 
-    let app = Router::new()
-        .route("/v1/chat/completions", post(handle_inference))
+    let admin_router = Router::new()
         .route("/admin/load-model", post(handle_load_model))
         .route("/bootstrap", get(handle_bootstrap))
-        .with_state(state.clone());
+        .with_state(admin_state)
+        .layer(axum::middleware::from_fn_with_state(
+            authenticator,
+            require_admin_authentication,
+        ));
+    let app = build_gateway_router(state).merge(admin_router);
 
     let listener = tokio::net::TcpListener::bind(&args.listen_addr)
         .await
@@ -618,8 +505,10 @@ async fn run_gateway() -> Result<()> {
 
     info!("HTTP server listening on {}", args.listen_addr);
 
+    let server_cancel = cancel.clone();
     let server_handle = tokio::spawn(async move {
         axum::serve(listener, app)
+            .with_graceful_shutdown(server_cancel.cancelled_owned())
             .await
             .context("HTTP server error")
     });
@@ -636,7 +525,9 @@ async fn run_gateway() -> Result<()> {
     info!("Shutting down...");
     cancel.cancel();
 
-    let _ = tokio::join!(network_handle, server_handle);
+    let (network_result, server_result) = tokio::join!(network_handle, server_handle);
+    network_result.context("network task failed")?;
+    server_result.context("HTTP server task failed")??;
 
     info!("Shutdown complete");
     Ok(())

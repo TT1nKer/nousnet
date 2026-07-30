@@ -8,6 +8,12 @@
 
 **Tech Stack:** Rust 1.97, Tokio, async-trait, reqwest 0.12, Axum 0.7, iroh 0.97, postcard, Clap, Windows DPAPI, existing Python/vLLM bridge.
 
+**Build location constraint (2026-07-30):** Do not run Cargo builds, checks, or
+tests on the development Mac. Its local build artifacts exhausted the
+available disk. Use the owner's Windows build drive, GitHub Actions, or Aliyun
+server instead. Windows acceptance must still follow Task 9 and must not
+install a missing toolchain through remote automation.
+
 ## Global Constraints
 
 - Installation leaves a node disabled; M1 runs only through an explicit foreground command.
