@@ -3,6 +3,10 @@ name = "psyche-inference-node"
 version.workspace = true
 edition = "2021"
 
+[features]
+default = ["vllm"]
+vllm = ["psyche-inference/vllm", "dep:pyo3"]
+
 [[bin]]
 name = "psyche-inference-node"
 path = "src/main.rs"
@@ -16,9 +20,8 @@ name = "gateway-node"
 path = "src/bin/gateway-node.rs"
 
 [dependencies]
-psyche-inference.workspace = true
+psyche-inference = { path = "../../../shared/inference", default-features = false }
 psyche-network.workspace = true
-psyche-core.workspace = true
 psyche-metrics.workspace = true
 
 tokio.workspace = true
@@ -40,7 +43,7 @@ reqwest = { version = "0.12", features = ["json"] }
 serde_json.workspace = true
 serde.workspace = true
 uuid = { version = "1", features = ["v4"] }
-pyo3.workspace = true
+pyo3 = { workspace = true, optional = true }
 postcard.workspace = true
 axum = { version = "0.7", features = ["macros"] }
 tower = { version = "0.4" }

@@ -10,11 +10,13 @@
 
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Parser, Subcommand};
+#[cfg(feature = "vllm")]
+use psyche_inference::{backends::vllm::VllmBackend, ModelSource};
 use psyche_inference::{
-    INFERENCE_ALPN, InferenceGossipMessage, InferenceNode, InferenceProtocol, ModelSource,
+    InferenceGossipMessage, InferenceProtocol, InferenceRuntime, INFERENCE_ALPN,
 };
 use psyche_metrics::ClientMetrics;
-use psyche_network::{DiscoveryMode, NetworkConnection, NetworkEvent, RelayKind, allowlist};
+use psyche_network::{allowlist, DiscoveryMode, NetworkConnection, NetworkEvent, RelayKind};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::{fs, time::Duration};
@@ -28,6 +30,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[derive(Debug, Clone)]
 enum ModelLoadState {
     Idle,
+    #[cfg(feature = "vllm")]
     Loading(String),
     Loaded(String),
 }
@@ -165,38 +168,50 @@ async fn main() -> Result<()> {
 
     let cancel = CancellationToken::new();
 
-    info!("Initializing Python interpreter...");
-    pyo3::prepare_freethreaded_python();
-    info!("Python interpreter initialized");
+    #[cfg(feature = "vllm")]
+    {
+        info!("Initializing Python interpreter...");
+        pyo3::prepare_freethreaded_python();
+        info!("Python interpreter initialized");
+    }
 
-    let inference_node_shared = if let Some(ref model_name) = run_args.model_name {
-        info!("Initializing vLLM engine with model: {}...", model_name);
-        let mut inference_node = InferenceNode::new(
-            model_name.clone(),
-            Some(run_args.tensor_parallel_size),
-            Some(run_args.gpu_memory_utilization),
-        );
-
-        inference_node
-            .initialize(
+    let inference_runtime = Arc::new(InferenceRuntime::new(1));
+    if let Some(ref model_name) = run_args.model_name {
+        #[cfg(feature = "vllm")]
+        {
+            info!("Initializing vLLM engine with model: {}...", model_name);
+            let backend = VllmBackend::initialize(
+                model_name.clone(),
                 Some(run_args.tensor_parallel_size),
                 Some(run_args.gpu_memory_utilization),
             )
+            .await
             .context("Failed to initialize vLLM engine")?;
 
-        info!("vLLM engine initialized successfully");
-        Arc::new(RwLock::new(Some(inference_node)))
+            inference_runtime
+                .start(Arc::new(backend))
+                .await
+                .context("Failed to start inference runtime")?;
+            info!("vLLM engine initialized successfully");
+        }
+
+        #[cfg(not(feature = "vllm"))]
+        anyhow::bail!(
+            "model {} requires a backend, but this binary was built without vLLM",
+            model_name
+        );
     } else {
         info!("No initial model - starting in idle mode");
-        Arc::new(RwLock::new(None))
-    };
+    }
 
     let model_state = Arc::new(RwLock::new(if let Some(ref model) = run_args.model_name {
         ModelLoadState::Loaded(model.clone())
     } else {
         ModelLoadState::Idle
     }));
+    #[cfg(feature = "vllm")]
     let tensor_parallel_size = run_args.tensor_parallel_size;
+    #[cfg(feature = "vllm")]
     let gpu_memory_utilization = run_args.gpu_memory_utilization;
 
     info!("Initializing P2P network...");
@@ -207,7 +222,7 @@ async fn main() -> Result<()> {
     type P2PNetwork = NetworkConnection<InferenceGossipMessage, ()>;
 
     info!("Registering inference protocol handler...");
-    let inference_protocol = InferenceProtocol::new(inference_node_shared.clone());
+    let inference_protocol = InferenceProtocol::new(inference_runtime.clone());
 
     let mut network = P2PNetwork::init_with_custom_protocol(
         run_id,
@@ -339,15 +354,12 @@ async fn main() -> Result<()> {
                                 info!("Received LoadModel request from {}: model={}, source={:?}",
                                       peer_id.fmt_short(), requested_model, model_source);
 
-                                let model_path = match model_source.clone() {
-                                    ModelSource::HuggingFace(name) | ModelSource::Local(name) => name,
-                                };
-
                                 let should_load = match &*model_state.read().await {
                                     ModelLoadState::Loaded(name) if name == &requested_model => {
                                         info!("Model {} already loaded, skipping", requested_model);
                                         false
                                     }
+                                    #[cfg(feature = "vllm")]
                                     ModelLoadState::Loading(name) => {
                                         info!("Model load already in progress ({}), skipping concurrent load request for {}",
                                               name, requested_model);
@@ -357,61 +369,71 @@ async fn main() -> Result<()> {
                                 };
 
                                 if should_load {
-                                    *model_state.write().await = ModelLoadState::Loading(requested_model.clone());
-                                    info!("Loading new model: {} (background task)", requested_model);
+                                    #[cfg(feature = "vllm")]
+                                    {
+                                        let model_path = match model_source {
+                                            ModelSource::HuggingFace(name) | ModelSource::Local(name) => name,
+                                        };
+                                        *model_state.write().await = ModelLoadState::Loading(requested_model.clone());
+                                        info!("Loading new model: {} (background task)", requested_model);
 
-                                    // Spawn background task to avoid blocking the event loop
-                                    // Model loading can take 10-60+ seconds, so we don't want to block heartbeats
-                                    let inference_node_shared_clone = inference_node_shared.clone();
-                                    let model_state_clone = model_state.clone();
-                                    let requested_model_clone = requested_model.clone();
+                                        // Loading runs behind the backend's blocking boundary so heartbeats continue.
+                                        let inference_runtime_clone = inference_runtime.clone();
+                                        let model_state_clone = model_state.clone();
+                                        let requested_model_clone = requested_model.clone();
 
-                                    tokio::spawn(async move {
-                                        // Shutdown old model if exists
-                                        let old_node = inference_node_shared_clone.write().await.take();
-                                        if let Some(mut old_node) = old_node {
-                                            info!("Shutting down existing model");
-                                            if let Err(e) = old_node.shutdown() {
-                                                error!("Error shutting down old model: {:#}", e);
+                                        tokio::spawn(async move {
+                                            info!("Draining existing inference backend");
+                                            if let Err(e) = inference_runtime_clone
+                                                .drain(Duration::from_secs(60))
+                                                .await
+                                            {
+                                                error!("Failed to drain existing backend: {:#}", e);
+                                                *model_state_clone.write().await = ModelLoadState::Idle;
+                                                return;
                                             }
-                                            // Give vLLM time to release GPU memory before loading new model
-                                            // This prevents OOM when switching between large models
+
+                                            // Give vLLM time to release GPU memory before loading a new model.
                                             info!("Waiting 5s for GPU memory to be released...");
                                             tokio::time::sleep(Duration::from_secs(5)).await;
-                                        }
 
-                                        // Load new model (blocking operation)
-                                        let load_result = (|| -> Result<InferenceNode> {
-                                            let mut new_node = InferenceNode::new(
-                                                model_path.clone(),
+                                            let load_result = VllmBackend::initialize(
+                                                model_path,
                                                 Some(tensor_parallel_size),
                                                 Some(gpu_memory_utilization),
-                                            );
+                                            )
+                                            .await;
 
-                                            new_node.initialize(
-                                                Some(tensor_parallel_size),
-                                                Some(gpu_memory_utilization),
-                                            )?;
-
-                                            Ok(new_node)
-                                        })();
-
-                                        match load_result {
-                                            Ok(new_node) => {
-                                                *inference_node_shared_clone.write().await = Some(new_node);
-                                                *model_state_clone.write().await = ModelLoadState::Loaded(requested_model_clone.clone());
-
-                                                info!("Successfully loaded model: {}", requested_model_clone);
-                                                // Note: NodeAvailable will be broadcast on next heartbeat (every 30s)
-                                                // or the node can be manually queried to verify the model is loaded
+                                            match load_result {
+                                                Ok(backend) => {
+                                                    if let Err(e) = inference_runtime_clone
+                                                        .start(Arc::new(backend))
+                                                        .await
+                                                    {
+                                                        error!("Failed to start model {}: {:#}", requested_model_clone, e);
+                                                        *model_state_clone.write().await = ModelLoadState::Idle;
+                                                        return;
+                                                    }
+                                                    *model_state_clone.write().await =
+                                                        ModelLoadState::Loaded(requested_model_clone.clone());
+                                                    info!("Successfully loaded model: {}", requested_model_clone);
+                                                }
+                                                Err(e) => {
+                                                    error!("Failed to load model {}: {:#}", requested_model_clone, e);
+                                                    *model_state_clone.write().await = ModelLoadState::Idle;
+                                                }
                                             }
-                                            Err(e) => {
-                                                error!("Failed to load model {}: {:#}", requested_model_clone, e);
-                                                // Set back to Idle on failure
-                                                *model_state_clone.write().await = ModelLoadState::Idle;
-                                            }
-                                        }
-                                    });
+                                        });
+                                    }
+
+                                    #[cfg(not(feature = "vllm"))]
+                                    {
+                                        let _ = model_source;
+                                        error!(
+                                            "Cannot load model {}: binary has no vLLM backend",
+                                            requested_model
+                                        );
+                                    }
                                 }
                             }
                             InferenceGossipMessage::ReloadCheckpoint { checkpoint_id, checkpoint_source } => {
@@ -445,9 +467,10 @@ async fn main() -> Result<()> {
     }
 
     info!("Shutting down inference node...");
-    if let Some(mut node) = inference_node_shared.write().await.take() {
-        node.shutdown()?;
-    }
+    inference_runtime
+        .drain(Duration::from_secs(60))
+        .await
+        .context("Failed to drain inference runtime")?;
     info!("Shutdown complete");
 
     Ok(())

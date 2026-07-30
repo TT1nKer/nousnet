@@ -3,24 +3,23 @@
 //! This implements iroh's ProtocolHandler trait to accept incoming
 //! inference requests over direct P2P connections.
 
-use crate::{InferenceMessage, InferenceNode, InferenceRequest, InferenceResponse};
+use crate::{InferenceMessage, InferenceRequest, InferenceResponse, InferenceRuntime};
 use anyhow::{Context, Result};
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 
 pub const INFERENCE_ALPN: &[u8] = b"/psyche/inference/1";
 
 #[derive(Clone, Debug)]
 pub struct InferenceProtocol {
-    inference_node: Arc<RwLock<Option<InferenceNode>>>,
+    runtime: Arc<InferenceRuntime>,
 }
 
 impl InferenceProtocol {
-    pub fn new(inference_node: Arc<RwLock<Option<InferenceNode>>>) -> Self {
-        Self { inference_node }
+    pub fn new(runtime: Arc<InferenceRuntime>) -> Self {
+        Self { runtime }
     }
 
     async fn handle_connection(&self, connection: Connection) -> Result<()> {
@@ -88,23 +87,11 @@ impl InferenceProtocol {
     }
 
     async fn process_request(&self, request: InferenceRequest) -> Result<InferenceResponse> {
-        let node = self.inference_node.read().await;
-
-        match node.as_ref() {
-            Some(node) => {
-                info!("Processing inference request: {}", request.request_id);
-                node.inference(&request).context("Failed to run inference")
-            }
-            None => {
-                error!("Inference node not initialized");
-                Ok(InferenceResponse {
-                    request_id: request.request_id,
-                    generated_text: String::new(),
-                    full_text: String::new(),
-                    finish_reason: Some("error: node not initialized".to_string()),
-                })
-            }
-        }
+        info!("Processing inference request: {}", request.request_id);
+        self.runtime
+            .execute(request)
+            .await
+            .context("Failed to run inference")
     }
 }
 
@@ -115,5 +102,32 @@ impl ProtocolHandler for InferenceProtocol {
             let io_error = std::io::Error::other(e.to_string());
             AcceptError::from_err(io_error)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ChatMessage;
+
+    #[tokio::test]
+    async fn disabled_runtime_returns_an_error_instead_of_a_fake_response() {
+        let protocol = InferenceProtocol::new(Arc::new(InferenceRuntime::new(1)));
+        let error = protocol
+            .process_request(InferenceRequest {
+                request_id: "disabled".to_string(),
+                messages: vec![ChatMessage {
+                    role: "user".to_string(),
+                    content: "hello".to_string(),
+                }],
+                max_tokens: 8,
+                temperature: 0.7,
+                top_p: 0.9,
+                stream: false,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("node is not ready"));
     }
 }

@@ -1,8 +1,8 @@
 //! Psyche Inference
 
 pub mod backend;
+pub mod backends;
 pub mod protocol;
-#[cfg(feature = "vllm")]
 pub mod protocol_handler;
 pub mod runtime;
 
@@ -18,6 +18,5 @@ pub use protocol::{
     ChatMessage, InferenceGossipMessage, InferenceMessage, InferenceRequest, InferenceResponse,
     ModelSource,
 };
-#[cfg(feature = "vllm")]
 pub use protocol_handler::{InferenceProtocol, INFERENCE_ALPN};
 pub use runtime::{InferenceRuntime, NodeLifecycleState, RuntimeError};
