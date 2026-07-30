@@ -1,0 +1,61 @@
+name: Inference node verification
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: inference-node-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ollama-only:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          cargo --version
+
+      - name: Reject training dependencies
+        run: |
+          cargo tree \
+            -p psyche-inference-node \
+            --no-default-features \
+            --features ollama \
+            -e normal > /tmp/inference-dependencies.txt
+          if grep -E '(^| )(psyche-network|tch|torch-sys|pyo3) v' /tmp/inference-dependencies.txt; then
+            echo "Ollama-only inference unexpectedly depends on the training runtime"
+            exit 1
+          fi
+
+      - name: Test gateway request policy
+        run: >-
+          cargo test -p psyche-inference-node
+          --no-default-features --features ollama
+          --lib gateway::
+
+      - name: Test lightweight P2P primitives
+        run: >-
+          cargo test -p psyche-inference-node
+          --no-default-features --features ollama
+          --lib p2p::
+
+      - name: Check gateway and Ollama node binaries
+        run: |
+          cargo check -p psyche-inference-node \
+            --no-default-features --features ollama \
+            --bin gateway-node
+          cargo check -p psyche-inference-node \
+            --no-default-features --features ollama \
+            --bin psyche-inference-node
