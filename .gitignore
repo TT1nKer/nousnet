@@ -35,6 +35,7 @@ perf.data.*
 .vscode/
 .zed/
 .idea/
+.worktrees/
 .venv/
 libtorch*
 slurm*
