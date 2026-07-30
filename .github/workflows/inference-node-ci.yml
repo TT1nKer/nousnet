@@ -97,6 +97,16 @@ jobs:
             target
           key: inference-windows-${{ hashFiles('Cargo.lock', 'architectures/inference-only/inference-node/Cargo.toml', 'shared/inference/Cargo.toml') }}
 
+      - name: Verify committed lock file
+        shell: pwsh
+        run: |
+          cargo metadata `
+            --format-version 1 `
+            --no-default-features `
+            --features psyche-inference-node/ollama | Out-Null
+          git diff -- Cargo.lock
+          git diff --exit-code -- Cargo.lock
+
       - name: Test Ollama-only inference on Windows
         shell: pwsh
         run: |
