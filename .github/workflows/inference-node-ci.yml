@@ -53,11 +53,14 @@ jobs:
           --no-default-features --features ollama
           --lib gateway::
 
-      - name: Test lightweight P2P primitives
-        run: >-
-          cargo test -p psyche-inference-node
-          --no-default-features --features ollama
-          --lib p2p::
+      - name: Test lightweight P2P path
+        run: |
+          cargo test -p psyche-inference-node \
+            --no-default-features --features ollama \
+            --lib p2p::
+          cargo test -p psyche-inference-node \
+            --no-default-features --features ollama \
+            --test p2p_ollama
 
       - name: Check gateway and Ollama node binaries
         run: |
