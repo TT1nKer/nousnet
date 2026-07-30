@@ -286,8 +286,6 @@ async fn run_gateway() -> Result<()> {
 
     let mut network = P2PNetwork::init(
         run_id,
-        None,
-        None,
         args.discovery_mode,
         args.relay_kind,
         bootstrap_peers,
