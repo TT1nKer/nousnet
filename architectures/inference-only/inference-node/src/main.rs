@@ -20,9 +20,8 @@ use psyche_inference::{
 use psyche_inference_node::{
     identity::{create_identity, load_identity},
     node_cli::{Cli, NodeBackendConfig, NodeCommand},
+    p2p::{InferenceNetwork, PeerAllowlist},
 };
-use psyche_metrics::ClientMetrics;
-use psyche_network::{allowlist, NetworkConnection, NetworkEvent};
 use std::sync::Arc;
 use std::{fs, time::Duration};
 use tokio::sync::RwLock;
@@ -119,8 +118,7 @@ async fn main() -> Result<()> {
         !bootstrap_peers.is_empty(),
         "at least one bootstrap gateway is required"
     );
-    let gateway_allowlist =
-        allowlist::AllowDynamic::with_nodes(bootstrap_peers.iter().map(|peer| peer.id));
+    let gateway_allowlist = PeerAllowlist::with_nodes(bootstrap_peers.iter().map(|peer| peer.id));
 
     let cancel = CancellationToken::new();
 
@@ -210,24 +208,20 @@ async fn main() -> Result<()> {
 
     info!("Initializing P2P network...");
 
-    let metrics = Arc::new(ClientMetrics::default());
     let run_id = "inference";
 
-    type P2PNetwork = NetworkConnection<InferenceGossipMessage, ()>;
+    type P2PNetwork = InferenceNetwork<InferenceGossipMessage>;
 
     info!("Registering inference protocol handler...");
     let inference_protocol = InferenceProtocol::new(inference_runtime.clone());
 
-    let mut network = P2PNetwork::init_with_custom_protocol(
+    let mut network = P2PNetwork::init_with_protocol(
         run_id,
-        None, // port (let OS choose)
-        None, // interface
         run_args.discovery_mode,
         run_args.relay_kind,
         bootstrap_peers,
         Some(identity_secret_key),
         gateway_allowlist.clone(),
-        metrics.clone(),
         Some(cancel.clone()),
         (INFERENCE_ALPN, inference_protocol),
     )
@@ -239,7 +233,7 @@ async fn main() -> Result<()> {
     info!("Protocol handler registered");
 
     if let Some(ref endpoint_file) = run_args.write_endpoint_file {
-        let endpoint_addr = network.router().endpoint().addr();
+        let endpoint_addr = network.endpoint_addr();
         let content = serde_json::to_string(&endpoint_addr)
             .context("Failed to serialize endpoint address")?;
         fs::write(endpoint_file, content).context("Failed to write endpoint file")?;
@@ -322,7 +316,7 @@ async fn main() -> Result<()> {
                     match psyche_inference_node::fetch_bootstrap_peer(url).await {
                         Ok(peer) => {
                             gateway_allowlist.add(peer.id);
-                            network.add_peers(vec![peer.id]);
+                            network.add_peer(peer.clone());
                             debug!("Re-bootstrapped from {}: peer {}", url, peer.id.fmt_short());
                         }
                         Err(e) => {
@@ -334,7 +328,7 @@ async fn main() -> Result<()> {
 
             event = network.poll_next() => {
                 match event {
-                    Ok(Some(NetworkEvent::MessageReceived((peer_id, msg)))) => {
+                    Ok(Some((peer_id, msg))) => {
                         debug!("Received gossip message from {}: {:?}", peer_id.fmt_short(), msg);
 
                         match msg {
@@ -448,18 +442,6 @@ async fn main() -> Result<()> {
                                 warn!("Checkpoint reloading not yet implemented");
                             }
                         }
-                    }
-                    Ok(Some(NetworkEvent::DownloadComplete(_))) => {
-                        // not used for now
-                        debug!("Download complete event");
-                    }
-                    Ok(Some(NetworkEvent::DownloadFailed(_))) => {
-                        warn!("Download failed event");
-                    }
-                    Ok(Some(NetworkEvent::ParameterRequest(..))) |
-                    Ok(Some(NetworkEvent::ModelConfigRequest(..))) => {
-                        // not used for inference nodes
-                        debug!("Parameter/config request (ignored)");
                     }
                     Ok(None) => {
                     }

@@ -2,16 +2,25 @@ use anyhow::{Context, Result};
 use iroh::EndpointAddr;
 use std::{fs, path::PathBuf};
 use tracing::info;
+use zeroize::Zeroizing;
 
 pub mod gateway;
 pub mod identity;
 pub mod node_cli;
+pub mod p2p;
 
 /// Fetch the gateway's endpoint address via its HTTP `/bootstrap` endpoint.
 pub async fn fetch_bootstrap_peer(gateway_url: &str) -> Result<EndpointAddr> {
     let url = format!("{}/bootstrap", gateway_url.trim_end_matches('/'));
+    let api_key = Zeroizing::new(
+        std::env::var("KOINON_GATEWAY_API_KEY")
+            .context("KOINON_GATEWAY_API_KEY is required to fetch bootstrap information")?,
+    );
     info!("Fetching bootstrap info from {}", url);
-    let addr: EndpointAddr = reqwest::get(&url)
+    let addr: EndpointAddr = reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(api_key.as_str())
+        .send()
         .await
         .context("Failed to reach gateway bootstrap endpoint")?
         .error_for_status()

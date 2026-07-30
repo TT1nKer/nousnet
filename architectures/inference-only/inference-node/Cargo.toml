@@ -22,13 +22,14 @@ path = "src/bin/gateway-node.rs"
 
 [dependencies]
 psyche-inference = { path = "../../../shared/inference", default-features = false }
-psyche-network.workspace = true
-psyche-metrics.workspace = true
 
 tokio.workspace = true
 tokio-util.workspace = true
 
 anyhow.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+sha2.workspace = true
 
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -37,10 +38,10 @@ clap.workspace = true
 clap-markdown.workspace = true
 
 iroh.workspace = true
-iroh-blobs.workspace = true
 iroh-gossip.workspace = true
+iroh-relay.workspace = true
 
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rand.workspace = true
 serde_json.workspace = true
 serde.workspace = true
@@ -50,7 +51,6 @@ pyo3 = { workspace = true, optional = true }
 postcard.workspace = true
 axum = { version = "0.7", features = ["macros"] }
 tower = { version = "0.4", features = ["util"] }
-tower-http = { version = "0.5", features = ["cors"] }
 tikv-jemallocator.workspace = true
 zeroize = "1.8.2"
 
@@ -66,6 +66,3 @@ windows-sys = { version = "0.61.2", features = [
 
 [dev-dependencies]
 tempfile = "3.25.0"
-# Gateway and protocol tests do not execute tensor code. This keeps their
-# binaries GPU-free while the legacy network crate still defaults to training.
-tch = { workspace = true, features = ["doc-only"] }

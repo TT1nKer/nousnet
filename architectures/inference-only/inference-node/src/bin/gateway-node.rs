@@ -19,6 +19,7 @@ use axum::{
 };
 use clap::Parser;
 use iroh::EndpointAddr;
+use iroh::EndpointId;
 use psyche_inference::{
     InferenceGossipMessage, InferenceMessage, InferenceRequest, InferenceResponse, INFERENCE_ALPN,
 };
@@ -29,10 +30,7 @@ use psyche_inference_node::gateway::{
     },
     routing::{load_endpoint_allowlist, NodeRecord},
 };
-use psyche_metrics::ClientMetrics;
-use psyche_network::{
-    allowlist, DiscoveryMode, EndpointId, NetworkConnection, NetworkEvent, RelayKind,
-};
+use psyche_inference_node::p2p::{DiscoveryMode, InferenceNetwork, PeerAllowlist, RelayKind};
 use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{sync::mpsc, time::sleep};
 use tokio_util::sync::CancellationToken;
@@ -277,15 +275,14 @@ async fn run_gateway() -> Result<()> {
     )?;
     let mut transport_endpoint_ids = allowed_endpoint_ids.clone();
     transport_endpoint_ids.extend(bootstrap_peers.iter().map(|peer| peer.id));
-    let transport_allowlist = allowlist::AllowDynamic::with_nodes(transport_endpoint_ids);
+    let transport_allowlist = PeerAllowlist::with_nodes(transport_endpoint_ids);
 
     let cancel = CancellationToken::new();
 
     info!("Initializing P2P network...");
-    let metrics = Arc::new(ClientMetrics::default());
     let run_id = "inference";
 
-    type P2PNetwork = NetworkConnection<InferenceGossipMessage, ()>;
+    type P2PNetwork = InferenceNetwork<InferenceGossipMessage>;
 
     let mut network = P2PNetwork::init(
         run_id,
@@ -296,7 +293,6 @@ async fn run_gateway() -> Result<()> {
         bootstrap_peers,
         None,
         transport_allowlist,
-        metrics.clone(),
         Some(cancel.clone()),
     )
     .await
@@ -313,7 +309,7 @@ async fn run_gateway() -> Result<()> {
         args.write_endpoint_file.clone()
     };
 
-    let endpoint_addr = network.router().endpoint().addr();
+    let endpoint_addr = network.endpoint_addr();
     let endpoints = vec![endpoint_addr.clone()];
 
     if let Some(ref endpoint_file) = endpoint_file {
@@ -388,7 +384,7 @@ async fn run_gateway() -> Result<()> {
                         info!("Sending inference request {} to {} via direct P2P",
                               request_id, target_peer_id.fmt_short());
 
-                        let endpoint = network.router().endpoint().clone();
+                        let endpoint = network.endpoint();
                         let state_clone = state.clone();
                         task_set.spawn(async move {
                             let result = tokio::time::timeout(
@@ -441,7 +437,7 @@ async fn run_gateway() -> Result<()> {
 
                     event = network.poll_next() => {
                         match event {
-                            Ok(Some(NetworkEvent::MessageReceived((peer_id, msg)))) => {
+                            Ok(Some((peer_id, msg))) => {
                                 info!("Received gossip message from {}", peer_id.fmt_short());
                                 match msg {
                                     InferenceGossipMessage::NodeAvailable {
@@ -474,9 +470,6 @@ async fn run_gateway() -> Result<()> {
                                         debug!("Checkpoint reload notification: {} from {}", checkpoint_id, checkpoint_source);
                                     }
                                 }
-                            }
-                            Ok(Some(_)) => {
-                                debug!("Other network event (ignored)");
                             }
                             Ok(None) => {}
                             Err(e) => {

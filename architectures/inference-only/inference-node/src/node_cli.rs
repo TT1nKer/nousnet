@@ -1,6 +1,6 @@
+use crate::p2p::{DiscoveryMode, RelayKind};
 use anyhow::{bail, ensure, Context, Result};
 use clap::{Args as ClapArgs, Parser, Subcommand, ValueEnum};
-use psyche_network::{DiscoveryMode, RelayKind};
 use std::{net::IpAddr, path::PathBuf, time::Duration};
 
 #[derive(Parser)]

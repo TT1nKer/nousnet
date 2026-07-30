@@ -9,9 +9,8 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use psyche_inference::InferenceGossipMessage;
-use psyche_metrics::ClientMetrics;
-use psyche_network::{DiscoveryMode, NetworkConnection, NetworkEvent, RelayKind, allowlist};
-use std::{fs, path::PathBuf, sync::Arc, time::Duration};
+use psyche_inference_node::p2p::{DiscoveryMode, InferenceNetwork, PeerAllowlist, RelayKind};
+use std::{fs, path::PathBuf, time::Duration};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
@@ -66,21 +65,17 @@ async fn main() -> Result<()> {
 
     info!("Initializing P2P network...");
 
-    let metrics = Arc::new(ClientMetrics::default());
     let run_id = "inference";
 
-    type P2PNetwork = NetworkConnection<InferenceGossipMessage, ()>;
+    type P2PNetwork = InferenceNetwork<InferenceGossipMessage>;
 
     let mut network = P2PNetwork::init(
         run_id,
-        None, // port (let OS choose)
-        None, // interface
         discovery_mode,
         relay_kind,
         bootstrap_peers,
         None, // secret key (generate new)
-        allowlist::AllowAll,
-        metrics.clone(),
+        PeerAllowlist::allow_all(),
         Some(cancel.clone()),
     )
     .await
@@ -91,7 +86,7 @@ async fn main() -> Result<()> {
 
     // write endpoint to file if requested
     if let Some(ref endpoint_file) = args.write_endpoint_file {
-        let endpoint_addr = network.router().endpoint().addr();
+        let endpoint_addr = network.endpoint_addr();
         let content = serde_json::to_string(&endpoint_addr)
             .context("Failed to serialize endpoint address")?;
         fs::write(endpoint_file, content).context("Failed to write endpoint file")?;
@@ -145,7 +140,7 @@ async fn main() -> Result<()> {
 
             event = network.poll_next() => {
                 match event {
-                    Ok(Some(NetworkEvent::MessageReceived((peer_id, msg)))) => {
+                    Ok(Some((peer_id, msg))) => {
                         match msg {
                             InferenceGossipMessage::NodeAvailable { model_name, checkpoint_id, capabilities, timestamp_ms: _ } => {
                                 peer_count += 1;
@@ -168,9 +163,6 @@ async fn main() -> Result<()> {
                                       peer_id.fmt_short(), checkpoint_id, checkpoint_source);
                             }
                         }
-                    }
-                    Ok(Some(_)) => {
-                        debug!("Other network event (ignored)");
                     }
                     Ok(None) => {}
                     Err(e) => {
