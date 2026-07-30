@@ -8,16 +8,21 @@
 //! - Handles inference requests via direct P2P connections
 //! - Supports dynamic checkpoint reloading
 
-use anyhow::{Context, Result};
-use clap::{Args as ClapArgs, Parser, Subcommand};
+use anyhow::{ensure, Context, Result};
+use clap::Parser;
+#[cfg(feature = "ollama")]
+use psyche_inference::backends::ollama::OllamaBackend;
 #[cfg(feature = "vllm")]
 use psyche_inference::{backends::vllm::VllmBackend, ModelSource};
 use psyche_inference::{
     InferenceGossipMessage, InferenceProtocol, InferenceRuntime, INFERENCE_ALPN,
 };
+use psyche_inference_node::{
+    identity::{create_identity, load_identity},
+    node_cli::{Cli, NodeBackendConfig, NodeCommand},
+};
 use psyche_metrics::ClientMetrics;
-use psyche_network::{allowlist, DiscoveryMode, NetworkConnection, NetworkEvent, RelayKind};
-use std::path::PathBuf;
+use psyche_network::{allowlist, NetworkConnection, NetworkEvent};
 use std::sync::Arc;
 use std::{fs, time::Duration};
 use tokio::sync::RwLock;
@@ -35,71 +40,6 @@ enum ModelLoadState {
     Loaded(String),
 }
 
-#[derive(Parser, Debug)]
-#[command(name = "psyche-inference-node")]
-struct Cli {
-    #[command(subcommand)]
-    command: Option<Commands>,
-
-    #[command(flatten)]
-    run_args: RunArgs,
-}
-
-#[derive(Subcommand, Debug)]
-enum Commands {
-    /// Run the inference node (default)
-    Run(Box<RunArgs>),
-
-    // Prints the help, optionally as markdown. Used for docs generation.
-    #[clap(hide = true)]
-    PrintAllHelp {
-        #[arg(long, required = true)]
-        markdown: bool,
-    },
-}
-
-#[derive(ClapArgs, Debug, Clone)]
-struct RunArgs {
-    #[arg(long)]
-    model_name: Option<String>,
-
-    #[arg(long, default_value = "1")]
-    tensor_parallel_size: usize,
-
-    #[arg(long, default_value = "0.9")]
-    gpu_memory_utilization: f64,
-
-    #[arg(long)]
-    checkpoint_path: Option<PathBuf>,
-
-    /// what discovery to use - public n0 or local
-    #[arg(long, env = "IROH_DISCOVERY", default_value = "n0")]
-    discovery_mode: DiscoveryMode,
-
-    /// what relays to use - public n0 or the private Psyche ones
-    #[arg(long, env = "IROH_RELAY", default_value = "psyche")]
-    relay_kind: RelayKind,
-
-    #[arg(long)]
-    relay_url: Option<String>,
-
-    /// node capabilities (comma-separated, e.g. "streaming,tool_use")
-    #[arg(long, default_value = "")]
-    capabilities: String,
-
-    /// gateway HTTP URL to fetch bootstrap peer from
-    #[arg(long, env = "PSYCHE_GATEWAY_URL")]
-    bootstrap_url: Option<String>,
-
-    /// bootstrap peer file (JSON file with gateway endpoint address)
-    #[arg(long)]
-    bootstrap_peer_file: Option<PathBuf>,
-
-    /// write endpoint address to file for other nodes to bootstrap from
-    #[arg(long)]
-    write_endpoint_file: Option<PathBuf>,
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -109,29 +49,39 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let cli = Cli::parse();
-
-    // If no subcommand is provided, default to run with the flattened args
-    let run_args = match cli.command {
-        Some(Commands::PrintAllHelp { markdown }) => {
-            assert!(markdown);
+    let run_args = match Cli::parse().into_command()? {
+        NodeCommand::InitIdentity { identity_file } => {
+            let endpoint_id = create_identity(&identity_file)?;
+            println!("{endpoint_id}");
+            return Ok(());
+        }
+        NodeCommand::PrintAllHelp => {
             clap_markdown::print_help_markdown::<Cli>();
             return Ok(());
         }
-        Some(Commands::Run(args)) => *args,
-        None => cli.run_args,
+        NodeCommand::Run(run_args) => run_args,
     };
+    let backend_config = run_args.backend_config()?;
+    let identity_secret_key = load_identity(run_args.identity_file()?)?;
 
     info!("Starting Psyche Inference Node");
-    info!(
-        "  Model: {}",
-        run_args.model_name.as_deref().unwrap_or("<idle>")
-    );
-    info!("Tensor Parallel Size: {}", run_args.tensor_parallel_size);
-    info!(
-        "GPU Memory Utilization: {}",
-        run_args.gpu_memory_utilization
-    );
+    match &backend_config {
+        NodeBackendConfig::Vllm {
+            model_name,
+            tensor_parallel_size,
+            gpu_memory_utilization,
+        } => {
+            info!("Backend: vLLM");
+            info!("Model: {}", model_name.as_deref().unwrap_or("<idle>"));
+            info!("Tensor Parallel Size: {}", tensor_parallel_size);
+            info!("GPU Memory Utilization: {}", gpu_memory_utilization);
+        }
+        NodeBackendConfig::Ollama { model_name, .. } => {
+            info!("Backend: Ollama");
+            info!("Model: {}", model_name);
+        }
+    }
+    info!("Endpoint ID: {}", identity_secret_key.public());
 
     let capabilities: Vec<String> = if run_args.capabilities.is_empty() {
         vec![]
@@ -165,54 +115,98 @@ async fn main() -> Result<()> {
             }
         }
     }
+    ensure!(
+        !bootstrap_peers.is_empty(),
+        "at least one bootstrap gateway is required"
+    );
+    let gateway_allowlist =
+        allowlist::AllowDynamic::with_nodes(bootstrap_peers.iter().map(|peer| peer.id));
 
     let cancel = CancellationToken::new();
 
-    #[cfg(feature = "vllm")]
-    {
-        info!("Initializing Python interpreter...");
-        pyo3::prepare_freethreaded_python();
-        info!("Python interpreter initialized");
-    }
-
     let inference_runtime = Arc::new(InferenceRuntime::new(1));
-    if let Some(ref model_name) = run_args.model_name {
-        #[cfg(feature = "vllm")]
-        {
-            info!("Initializing vLLM engine with model: {}...", model_name);
-            let backend = VllmBackend::initialize(
-                model_name.clone(),
-                Some(run_args.tensor_parallel_size),
-                Some(run_args.gpu_memory_utilization),
-            )
-            .await
-            .context("Failed to initialize vLLM engine")?;
-
-            inference_runtime
-                .start(Arc::new(backend))
+    match &backend_config {
+        NodeBackendConfig::Vllm {
+            model_name: Some(model_name),
+            tensor_parallel_size,
+            gpu_memory_utilization,
+        } => {
+            #[cfg(feature = "vllm")]
+            {
+                info!("Initializing Python interpreter...");
+                pyo3::prepare_freethreaded_python();
+                info!("Initializing vLLM engine with model: {}...", model_name);
+                let backend = VllmBackend::initialize(
+                    model_name.clone(),
+                    Some(*tensor_parallel_size),
+                    Some(*gpu_memory_utilization),
+                )
                 .await
-                .context("Failed to start inference runtime")?;
-            info!("vLLM engine initialized successfully");
-        }
+                .context("Failed to initialize vLLM engine")?;
+                inference_runtime
+                    .start(Arc::new(backend))
+                    .await
+                    .context("Failed to start inference runtime")?;
+                info!("vLLM engine initialized successfully");
+            }
 
-        #[cfg(not(feature = "vllm"))]
-        anyhow::bail!(
-            "model {} requires a backend, but this binary was built without vLLM",
-            model_name
-        );
-    } else {
-        info!("No initial model - starting in idle mode");
+            #[cfg(not(feature = "vllm"))]
+            {
+                let _ = (tensor_parallel_size, gpu_memory_utilization);
+                anyhow::bail!(
+                    "model {} requires vLLM, but this binary was built without it",
+                    model_name
+                );
+            }
+        }
+        NodeBackendConfig::Vllm {
+            model_name: None, ..
+        } => info!("No initial vLLM model - starting in idle mode"),
+        NodeBackendConfig::Ollama {
+            model_name,
+            provider_url,
+            timeout,
+        } => {
+            #[cfg(feature = "ollama")]
+            {
+                let backend = OllamaBackend::new(provider_url, model_name.clone(), *timeout)
+                    .context("Invalid Ollama backend configuration")?;
+                inference_runtime
+                    .start(Arc::new(backend))
+                    .await
+                    .context("Failed to start Ollama backend")?;
+                info!("Ollama backend is healthy");
+            }
+
+            #[cfg(not(feature = "ollama"))]
+            {
+                let _ = (provider_url, timeout);
+                anyhow::bail!(
+                    "model {} requires Ollama, but this binary was built without it",
+                    model_name
+                );
+            }
+        }
     }
 
-    let model_state = Arc::new(RwLock::new(if let Some(ref model) = run_args.model_name {
+    let initial_model_name = match &backend_config {
+        NodeBackendConfig::Vllm { model_name, .. } => model_name.clone(),
+        NodeBackendConfig::Ollama { model_name, .. } => Some(model_name.clone()),
+    };
+    let model_state = Arc::new(RwLock::new(if let Some(model) = initial_model_name {
         ModelLoadState::Loaded(model.clone())
     } else {
         ModelLoadState::Idle
     }));
     #[cfg(feature = "vllm")]
-    let tensor_parallel_size = run_args.tensor_parallel_size;
-    #[cfg(feature = "vllm")]
-    let gpu_memory_utilization = run_args.gpu_memory_utilization;
+    let vllm_reload_config = match &backend_config {
+        NodeBackendConfig::Vllm {
+            tensor_parallel_size,
+            gpu_memory_utilization,
+            ..
+        } => Some((*tensor_parallel_size, *gpu_memory_utilization)),
+        NodeBackendConfig::Ollama { .. } => None,
+    };
 
     info!("Initializing P2P network...");
 
@@ -231,8 +225,8 @@ async fn main() -> Result<()> {
         run_args.discovery_mode,
         run_args.relay_kind,
         bootstrap_peers,
-        None,                // secret key (generate new)
-        allowlist::AllowAll, // No allowlist for inference network
+        Some(identity_secret_key),
+        gateway_allowlist.clone(),
         metrics.clone(),
         Some(cancel.clone()),
         (INFERENCE_ALPN, inference_protocol),
@@ -327,6 +321,7 @@ async fn main() -> Result<()> {
                 if let Some(ref url) = run_args.bootstrap_url {
                     match psyche_inference_node::fetch_bootstrap_peer(url).await {
                         Ok(peer) => {
+                            gateway_allowlist.add(peer.id);
                             network.add_peers(vec![peer.id]);
                             debug!("Re-bootstrapped from {}: peer {}", url, peer.id.fmt_short());
                         }
@@ -371,6 +366,16 @@ async fn main() -> Result<()> {
                                 if should_load {
                                     #[cfg(feature = "vllm")]
                                     {
+                                        let Some((tensor_parallel_size, gpu_memory_utilization)) =
+                                            vllm_reload_config
+                                        else {
+                                            let _ = model_source;
+                                            error!(
+                                                "Cannot dynamically load model {}: node is not configured for vLLM",
+                                                requested_model
+                                            );
+                                            continue;
+                                        };
                                         let model_path = match model_source {
                                             ModelSource::HuggingFace(name) | ModelSource::Local(name) => name,
                                         };
@@ -467,6 +472,9 @@ async fn main() -> Result<()> {
     }
 
     info!("Shutting down inference node...");
+    if let Err(error) = network.broadcast(&InferenceGossipMessage::NodeUnavailable) {
+        warn!("Failed to broadcast node unavailability: {error:#}");
+    }
     inference_runtime
         .drain(Duration::from_secs(60))
         .await

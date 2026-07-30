@@ -3,6 +3,9 @@ use iroh::EndpointAddr;
 use std::{fs, path::PathBuf};
 use tracing::info;
 
+pub mod identity;
+pub mod node_cli;
+
 /// Fetch the gateway's endpoint address via its HTTP `/bootstrap` endpoint.
 pub async fn fetch_bootstrap_peer(gateway_url: &str) -> Result<EndpointAddr> {
     let url = format!("{}/bootstrap", gateway_url.trim_end_matches('/'));
