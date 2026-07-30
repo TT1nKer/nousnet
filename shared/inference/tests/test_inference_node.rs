@@ -3,7 +3,7 @@
 #[cfg(feature = "vllm-tests")]
 use psyche_inference::node::InferenceNode;
 #[cfg(feature = "vllm-tests")]
-use psyche_inference::protocol::InferenceRequest;
+use psyche_inference::protocol::{ChatMessage, InferenceRequest};
 #[cfg(feature = "vllm-tests")]
 use serial_test::serial;
 
@@ -35,7 +35,10 @@ fn test_inference_node_local() {
 
         let request = InferenceRequest {
             request_id: "test-request-1".to_string(),
-            prompt: "Once upon a time".to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "Once upon a time".to_string(),
+            }],
             max_tokens: 20,
             temperature: 0.7,
             top_p: 0.9,
@@ -87,7 +90,10 @@ fn test_inference_node_multiple_requests() {
         // First request
         let req1 = InferenceRequest {
             request_id: "req-1".to_string(),
-            prompt: "Hello".to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+            }],
             max_tokens: 10,
             temperature: 0.7,
             top_p: 0.9,
@@ -100,7 +106,10 @@ fn test_inference_node_multiple_requests() {
         // Second request
         let req2 = InferenceRequest {
             request_id: "req-2".to_string(),
-            prompt: "Goodbye".to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "Goodbye".to_string(),
+            }],
             max_tokens: 10,
             temperature: 0.7,
             top_p: 0.9,

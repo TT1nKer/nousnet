@@ -4,10 +4,13 @@ version.workspace = true
 edition = "2021"
 
 [features]
-vllm-tests = []
+default = ["vllm"]
+vllm = ["dep:pyo3"]
+ollama = []
+vllm-tests = ["vllm"]
 
 [dependencies]
-pyo3.workspace = true
+pyo3 = { workspace = true, optional = true }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

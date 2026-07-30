@@ -2,7 +2,7 @@
 
 use crate::protocol::{InferenceRequest, InferenceResponse};
 use crate::vllm;
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use pyo3::prelude::*;
 use tracing::{debug, info, warn};
 

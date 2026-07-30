@@ -1,7 +1,7 @@
 // Integration test for vLLM Rust bindings
 
 #[cfg(feature = "vllm-tests")]
-use psyche_inference::vllm;
+use psyche_inference::{vllm, ChatMessage};
 #[cfg(feature = "vllm-tests")]
 use pyo3::Python;
 #[cfg(feature = "vllm-tests")]
@@ -105,7 +105,10 @@ fn test_run_inference() {
         let result = vllm::run_inference(
             py,
             "inference_test",
-            "Once upon a time",
+            vec![ChatMessage {
+                role: "user".to_string(),
+                content: "Once upon a time".to_string(),
+            }],
             Some(0.7), // temperature
             Some(0.9), // top_p
             Some(20),  // max_tokens
